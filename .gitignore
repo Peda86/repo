@@ -1,0 +1,8 @@
+.env
+
+# Laufzeitdaten der BDT-Bridge (eingehende/verarbeitete/fehlerhafte Dateien)
+bdt_poll/*
+!bdt_poll/.gitkeep
+
+__pycache__/
+*.pyc
