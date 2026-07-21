@@ -6,6 +6,7 @@ PACS-Server auf Basis von [dcm4chee-arc-light](https://github.com/dcm4che/dcm4ch
 - **DICOM-Archiv** (C-STORE, C-FIND, C-MOVE, QIDO-RS/WADO-RS/STOW-RS)
 - **Modality Worklist Server (MWL)** fuer die Anbindung von Modalitaeten (CT, MRT, Roentgen, ...)
 - **Web-UI** zur Konfiguration, Ueberwachung und Verwaltung von Studien/Worklist-Eintraegen
+- **BDT-Bridge**: liest BDT-Dateien aus einem Ordner ein und legt daraus automatisch Worklist-Eintraege an (siehe [BDT-Schnittstelle](#bdt-schnittstelle-bdt-bridge))
 
 > Hinweis: Bei dcm4chee-arc-light ist der Worklist-Server kein separater Dienst,
 > sondern Teil des Archiv-Containers (`arc`). Archiv und MWL-SCP teilen sich
@@ -19,6 +20,7 @@ PACS-Server auf Basis von [dcm4chee-arc-light](https://github.com/dcm4che/dcm4ch
 | `ldap` | `dcm4che/slapd-dcm4chee` | Konfigurationsspeicher (Devices, AE Titles, Storage, Worklist-Regeln) |
 | `db` | `dcm4che/postgres-dcm4chee` | PostgreSQL-Datenbank (Metadaten, Studien, Worklist-Eintraege) |
 | `arc` | `dcm4che/dcm4chee-arc-psql` | Archiv-Anwendung: DICOM-Services, MWL-SCP, REST-API, Web-UI |
+| `bdt-bridge` | eigenes Image (`./bdt-bridge`) | Liest BDT-Dateien aus `./bdt_poll` und legt MWL-Eintraege per REST-API im Archiv an |
 
 ## Voraussetzungen
 
@@ -88,6 +90,82 @@ findscu -c CTAET@<ARCHIVE_HOST>:11112 -W
 
 # Bild speichern (C-STORE)
 storescu -c DCM4CHEE@<ARCHIVE_HOST>:11112 pfad/zu/datei.dcm
+```
+
+## BDT-Schnittstelle (BDT-Bridge)
+
+Der Dienst `bdt-bridge` ueberwacht den Ordner `./bdt_poll` (Bind-Mount,
+liegt im Projektverzeichnis) und verarbeitet dort abgelegte `*.bdt`-Dateien
+automatisch zu Modality-Worklist-Eintraegen im Archiv - z.B. als
+Anbindung eines Praxisverwaltungssystems (PVS/KIS), das Auftraege als
+BDT-Datei exportiert.
+
+**Ablauf:**
+
+1. Eine Praxissoftware (oder ein manueller Test) legt eine `.bdt`-Datei in
+   `bdt_poll/` ab.
+2. Die Bridge erkennt die Datei beim naechsten Poll-Zyklus (Standard: alle
+   5 Sekunden, `BDT_POLL_INTERVAL_SECONDS`), wartet bis die Dateigroesse
+   stabil ist (kein laufender Schreibvorgang mehr) und parst sie.
+3. Aus den erkannten Feldern wird ein MWL-Datensatz gebaut und per
+   `POST /dcm4chee-arc/aets/{AET}/rs/mwlitems` (DICOM+JSON) im Archiv
+   angelegt.
+4. Die Datei wird verschoben nach:
+   - `bdt_poll/verarbeitet/` bei Erfolg,
+   - `bdt_poll/fehler/` bei einem dauerhaften Fehler (z.B. fehlende
+     Pflichtfelder oder vom Archiv inhaltlich abgelehnter Datensatz) -
+     zusaetzlich wird eine `.err`-Datei mit der Fehlermeldung abgelegt.
+   Ist das Archiv nur voruebergehend nicht erreichbar, bleibt die Datei im
+   Poll-Ordner liegen und wird automatisch erneut versucht.
+
+### Unterstuetzte BDT-Feldkennungen
+
+BDT (Behandlungsdaten-Datentraeger) definiert selbst keine Felder fuer
+bildgebende Auftraege (Modalitaet, Geraet, Termin) - dafuer nutzt die
+Bridge zusaetzliche, frei belegbare Feldkennungen, die das exportierende
+System mit ausgeben muss. Alle Zuordnungen lassen sich in
+`bdt-bridge/bdt_bridge.py` (`FIELD_MAP`) an das jeweilige Quellsystem
+anpassen.
+
+| Feldkennung | Bedeutung | Pflicht |
+|---|---|---|
+| 3000 | Patienten-Nr. | ja |
+| 3101 | Nachname | ja |
+| 3102 | Vorname | nein |
+| 3103 | Geburtsdatum (TTMMJJJJ) | nein |
+| 3110 | Geschlecht (1=maennlich, 2=weiblich, 3=divers) | nein |
+| 6220 *(Erweiterung)* | Auftragsnummer/Accession Number | nein (wird sonst generiert) |
+| 6221 *(Erweiterung)* | Modalitaet (z.B. CT, MR, CR) | nein (Default: `DEFAULT_MODALITY`) |
+| 6222 *(Erweiterung)* | Ziel-AE-Title der Modalitaet | nein (Default: `DEFAULT_STATION_AET`) |
+| 6223 *(Erweiterung)* | Termin, Format JJJJMMTTHHMM | nein (Default: jetzt) |
+| 6224 *(Erweiterung)* | Beschreibung der Untersuchung | nein |
+| 6200 | Diagnose (wiederholbar) | nein |
+
+Eine Beispieldatei liegt unter `bdt-bridge/examples/beispiel.bdt`.
+
+### Konfiguration (.env)
+
+| Variable | Standard | Bedeutung |
+|---|---|---|
+| `ARC_AE_TITLE` | `DCM4CHEE` | AE Title, unter der die MWL-Eintraege im Archiv angelegt werden |
+| `DEFAULT_MODALITY` | `OT` | Modalitaet, falls Feld 6221 fehlt |
+| `DEFAULT_STATION_AET` | *(leer)* | Ziel-AE-Title, falls Feld 6222 fehlt |
+| `BDT_ENCODING` | `cp850` | Zeichensatz der BDT-Dateien (Fallback: `latin-1`) |
+| `BDT_POLL_INTERVAL_SECONDS` | `5` | Abstand zwischen zwei Ordner-Scans |
+
+### Testen
+
+```bash
+docker compose up -d --build bdt-bridge
+cp bdt-bridge/examples/beispiel.bdt bdt_poll/
+docker compose logs -f bdt-bridge
+```
+
+Danach in der Web-UI unter **Monitoring > MWL** pruefen, oder per
+DICOM-Toolkit abfragen:
+
+```bash
+findscu -c CTAET@<ARCHIVE_HOST>:11112 -W
 ```
 
 ## Datenpersistenz

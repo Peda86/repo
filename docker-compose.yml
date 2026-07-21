@@ -71,6 +71,24 @@ services:
     networks:
       - pacs
 
+  bdt-bridge:
+    build: ./bdt-bridge
+    restart: unless-stopped
+    depends_on:
+      - arc
+    environment:
+      POLL_DIR: /bdt_poll
+      POLL_INTERVAL_SECONDS: ${BDT_POLL_INTERVAL_SECONDS:-5}
+      BDT_ENCODING: ${BDT_ENCODING:-cp850}
+      ARC_BASE_URL: http://arc:8080/dcm4chee-arc
+      ARC_AE_TITLE: ${ARC_AE_TITLE:-DCM4CHEE}
+      DEFAULT_MODALITY: ${DEFAULT_MODALITY:-OT}
+      DEFAULT_STATION_AET: ${DEFAULT_STATION_AET:-}
+    volumes:
+      - ./bdt_poll:/bdt_poll
+    networks:
+      - pacs
+
 networks:
   pacs:
     driver: bridge
