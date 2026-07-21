@@ -1,0 +1,83 @@
+# dcm4chee-arc-light PACS: DICOM Archive + Modality Worklist (MWL) Server + Web UI
+# Der "arc"-Container enthält bereits den Worklist-SCP (Modality Worklist),
+# es ist daher kein separater Worklist-Server nötig - beides läuft im selben
+# Archiv-Dienst und teilt sich dieselbe Datenbank/Konfiguration.
+
+services:
+  ldap:
+    image: dcm4che/slapd-dcm4chee:${SLAPD_VERSION:-2.6.13-35.0}
+    restart: unless-stopped
+    ports:
+      - "389:389"
+      - "636:636"
+    environment:
+      ARCHIVE_HOST: ${ARCHIVE_HOST:-localhost}
+      STORAGE_DIR: /storage/fs1
+    volumes:
+      - ldap_data:/var/lib/openldap/openldap-data
+      - ldap_confdata:/etc/openldap/slapd.d
+    networks:
+      - pacs
+
+  db:
+    image: dcm4che/postgres-dcm4chee:${POSTGRES_VERSION:-18.3-35}
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pacsdb}
+      POSTGRES_USER: ${POSTGRES_USER:-pacs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pacs}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    networks:
+      - pacs
+
+  arc:
+    image: dcm4che/dcm4chee-arc-psql:${ARC_VERSION:-5.35.0}
+    restart: unless-stopped
+    depends_on:
+      - ldap
+      - db
+    ports:
+      # Web-UI + REST-API
+      - "8080:8080"
+      - "8443:8443"
+      # Wildfly Admin-Konsole
+      - "9990:9990"
+      - "9993:9993"
+      # DICOM: C-STORE / C-FIND / C-MOVE (Archiv) und Modality Worklist (MWL) C-FIND
+      # -> dieselbe AE Title/Port bedient sowohl PACS-Archiv als auch Worklist-Abfragen
+      - "11112:11112"
+      - "2762:2762"
+      # HL7 (z.B. Orders fuer Worklist-Erzeugung aus RIS/KIS)
+      - "2575:2575"
+      - "12575:12575"
+    environment:
+      WILDFLY_ADMIN_USER: ${WILDFLY_ADMIN_USER:-admin}
+      WILDFLY_ADMIN_PASSWORD: ${WILDFLY_ADMIN_PASSWORD:-admin}
+      WILDFLY_CHOWN: /storage
+      WILDFLY_WAIT_FOR: ldap:389 db:5432
+      POSTGRES_DB: ${POSTGRES_DB:-pacsdb}
+      POSTGRES_USER: ${POSTGRES_USER:-pacs}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pacs}
+      JAVA_OPTS: >-
+        -Xms64m -Xmx1024m -XX:MetaspaceSize=96M -XX:MaxMetaspaceSize=256m
+        -Djava.net.preferIPv4Stack=true -Djboss.modules.system.pkgs=org.jboss.byteman
+        -Djava.awt.headless=true
+    volumes:
+      - arc_wildfly:/opt/wildfly/standalone
+      - arc_storage:/storage
+    networks:
+      - pacs
+
+networks:
+  pacs:
+    driver: bridge
+
+volumes:
+  ldap_data:
+  ldap_confdata:
+  db_data:
+  arc_wildfly:
+  arc_storage:
